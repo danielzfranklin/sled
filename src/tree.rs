@@ -33,6 +33,41 @@ impl IntoIterator for &'_ Tree {
     }
 }
 
+pub(crate) enum MergeOperatorSlot {
+    Unset,
+    Infallible(Box<dyn MergeOperator>),
+    Fallible(Box<dyn TryMergeOperator>),
+}
+
+impl MergeOperatorSlot {
+    fn infallible_or_error(&self) -> Result<&Box<dyn MergeOperator>> {
+        match self {
+            MergeOperatorSlot::Unset => Err(Error::Unsupported(
+                "must set a merge operator on this Tree before calling merge \
+                by calling Tree::set_merge_operator",
+            )),
+            MergeOperatorSlot::Infallible(ref op) => Ok(op),
+            MergeOperatorSlot::Fallible(_) => Err(Error::Unsupported(
+                "cannot call merge if you've called Tree::set_try_merge_operator",
+            )),
+        }
+    }
+
+    fn fallible_or_error(&self) -> Result<&Box<dyn TryMergeOperator>> {
+        match self {
+            MergeOperatorSlot::Unset => Err(Error::Unsupported(
+                "must set a try merge operator on this Tree before calling \
+                try_merge by calling Tree::set_try_merge_operator",
+            )),
+            MergeOperatorSlot::Infallible(_) => Err(Error::Unsupported(
+                "cannot call try_merge if you've called \
+                Tree::set_try_merge_operator",
+            )),
+            MergeOperatorSlot::Fallible(ref op) => Ok(op),
+        }
+    }
+}
+
 const fn out_of_bounds(numba: usize) -> bool {
     numba > MAX_BLOB
 }
@@ -110,7 +145,7 @@ pub struct TreeInner {
     pub(crate) context: Context,
     pub(crate) subscribers: Subscribers,
     pub(crate) root: AtomicU64,
-    pub(crate) merge_operator: RwLock<Option<Box<dyn MergeOperator>>>,
+    pub(crate) merge_operator: RwLock<MergeOperatorSlot>,
 }
 
 impl Drop for TreeInner {
@@ -1085,12 +1120,17 @@ impl Tree {
     /// Merge operators can be used to implement arbitrary data
     /// structures.
     ///
-    /// Calling `merge` will return an `Unsupported` error if it
-    /// is called without first setting a merge operator function.
+    /// Calling `merge` will return an `Unsupported` error if you don't first
+    /// set an operator with [`Tree::set_merge_operator`].
     ///
     /// Merge operators are shared by all instances of a particular
     /// `Tree`. Different merge operators may be set on different
     /// `Tree`s.
+    ///
+    /// You can either use [`Tree::set_merge_operator`] and [`Tree::merge`] or
+    /// [`Tree::set_try_merge_operator`] and [`Tree::try_merge`]. Setting one
+    /// kind of operator overrides the other. Calling `merge` when you have a
+    /// try merge operator set will error and visa-verse.
     ///
     /// # Examples
     ///
@@ -1142,7 +1182,82 @@ impl Tree {
     {
         let _cc = concurrency_control::read();
         loop {
-            if let Ok(merge) = self.merge_inner(key.as_ref(), value.as_ref())? {
+            if let Ok(merge) =
+                self.merge_inner(false, key.as_ref(), value.as_ref())?
+            {
+                return Ok(merge);
+            }
+        }
+    }
+
+    /// Like [`Tree::merge`], but your operator can error.
+    ///
+    /// You can either use [`Tree::set_merge_operator`] and [`Tree::merge`] or
+    /// [`Tree::set_try_merge_operator`] and [`Tree::try_merge`]. Setting one
+    /// kind of operator overrides the other. Calling `merge` when you have a
+    /// try merge operator set will error and visa-verse.
+    ///
+    /// Your merge operator return `Ok(Some(bytes))` to set a value, `Ok(None)`
+    /// to delete the value completely, or `Err(string_message)` to have the
+    /// call to [`Tree::merge`] return
+    /// `Err(Error::MergeOperatorFailed(string_message))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use sled::{Config, IVec, Error};
+    ///
+    /// fn concatenate_merge(
+    ///   _key: &[u8],               // the key being merged
+    ///   old_value: Option<&[u8]>,  // the previous value, if one existed
+    ///   merged_bytes: &[u8]        // the new bytes being merged in
+    /// ) -> Result<Option<Vec<u8>>, &'static str> {
+    ///   if merged_bytes.get(0) == Some(&42) {
+    ///      return Err("malformed new bytes");
+    ///   }
+    ///
+    ///   let mut ret = old_value
+    ///     .map(|ov| ov.to_vec())
+    ///     .unwrap_or_else(|| vec![]);
+    ///
+    ///   ret.extend_from_slice(merged_bytes);
+    ///
+    ///   Ok(Some(ret))
+    /// }
+    ///
+    /// let config = Config::new()
+    ///   .temporary(true);
+    ///
+    /// let tree = config.open()?;
+    /// tree.set_try_merge_operator(concatenate_merge);
+    ///
+    /// let k = b"k1";
+    ///
+    /// tree.try_merge(k, vec![0])?;
+    /// tree.try_merge(k, vec![1])?;
+    ///
+    /// // You can use [`Box::downcast`] to get your error type back
+    /// match tree.try_merge(k, vec![42]) {
+    ///     Err(Error::MergeOperatorFailed(err)) => {
+    ///         assert_eq!(err, "malformed new bytes");
+    ///     }
+    ///     Ok(_) => unreachable!("in this example the merge doesn't succeed"),
+    ///     Err(_) => unreachable!("in this example other errors don't happen"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn try_merge<K, V>(&self, key: K, value: V) -> Result<Option<IVec>>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let _cc = concurrency_control::read();
+        loop {
+            if let Ok(merge) =
+                self.merge_inner(true, key.as_ref(), value.as_ref())?
+            {
                 return Ok(merge);
             }
         }
@@ -1150,6 +1265,7 @@ impl Tree {
 
     pub(crate) fn merge_inner(
         &self,
+        fallible: bool,
         key: &[u8],
         value: &[u8],
     ) -> Result<Conflictable<Option<IVec>>> {
@@ -1157,17 +1273,7 @@ impl Tree {
         #[cfg(feature = "metrics")]
         let _measure = Measure::new(&M.tree_merge);
 
-        let merge_operator_opt = self.merge_operator.read();
-
-        if merge_operator_opt.is_none() {
-            return Err(Error::Unsupported(
-                "must set a merge operator on this Tree \
-                 before calling merge by calling \
-                 Tree::set_merge_operator"
-            ));
-        }
-
-        let merge_operator = merge_operator_opt.as_ref().unwrap();
+        let operator = self.merge_operator.read();
 
         loop {
             let guard = pin();
@@ -1177,7 +1283,14 @@ impl Tree {
             let (encoded_key, current_value) =
                 node_view.node_kv_pair(key.as_ref());
             let tmp = current_value.as_ref().map(AsRef::as_ref);
-            let new_opt = merge_operator(key, tmp, value).map(IVec::from);
+
+            let new_opt = if fallible {
+                operator.fallible_or_error()?(key, tmp, value)
+                    .map_err(Error::MergeOperatorFailed)?
+                    .map(IVec::from)
+            } else {
+                operator.infallible_or_error()?(key, tmp, value).map(IVec::from)
+            };
 
             if new_opt.as_ref().map(AsRef::as_ref) == current_value {
                 // short-circuit no-op write
@@ -1219,6 +1332,11 @@ impl Tree {
     /// into a value directly, without any read-modify-write steps.
     /// Merge operators can be used to implement arbitrary data
     /// structures.
+    ///
+    /// You can either use [`Tree::set_merge_operator`] and [`Tree::merge`] or
+    /// [`Tree::set_try_merge_operator`] and [`Tree::try_merge`]. Setting one
+    /// kind of operator overrides the other. Calling `merge` when you have a
+    /// try merge operator set will error and visa-verse.
     ///
     /// # Panics
     ///
@@ -1273,7 +1391,18 @@ impl Tree {
         merge_operator: impl MergeOperator + 'static,
     ) {
         let mut mo_write = self.merge_operator.write();
-        *mo_write = Some(Box::new(merge_operator));
+        *mo_write = MergeOperatorSlot::Infallible(Box::new(merge_operator));
+    }
+
+    /// Sets a try merge operator for use with the [`Tree::try_merge`] function.
+    ///
+    /// See the documentation for [`Tree::try_merge`] for details.
+    pub fn set_try_merge_operator(
+        &self,
+        operator: impl TryMergeOperator + 'static,
+    ) {
+        let mut mo_write = self.merge_operator.write();
+        *mo_write = MergeOperatorSlot::Fallible(Box::new(operator));
     }
 
     /// Create a double-ended iterator over the tuples of keys and

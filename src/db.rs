@@ -85,7 +85,7 @@ impl Db {
                 subscribers: Subscribers::default(),
                 context: context.clone(),
                 root: AtomicU64::new(*root),
-                merge_operator: RwLock::new(None),
+                merge_operator: RwLock::new(tree::MergeOperatorSlot::Unset),
             }));
             assert!(tenants.insert(id.clone(), tree).is_none());
         }

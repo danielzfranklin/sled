@@ -43,6 +43,8 @@ pub enum Error {
         /// The file location that corrupted data was found at.
         at: Option<DiskPtr>,
     },
+    /// You set a fallible merge operator and it errored.
+    MergeOperatorFailed(&'static str),
     // a failpoint has been triggered for testing purposes
     #[doc(hidden)]
     #[cfg(feature = "failpoints")]
@@ -89,6 +91,13 @@ impl PartialEq for Error {
                 }
             }
             Io(_, _) => false,
+            MergeOperatorFailed(ref l) => {
+                if let MergeOperatorFailed(ref r) = *other {
+                    l == r
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -126,6 +135,10 @@ impl From<Error> for io::Error {
             ),
             #[cfg(feature = "failpoints")]
             FailPoint => io::Error::new(ErrorKind::Other, "failpoint"),
+            MergeOperatorFailed(e) => io::Error::new(
+                ErrorKind::Other,
+                format!("merge operator failed: {}", e),
+            ),
         }
     }
 }
@@ -157,6 +170,9 @@ impl Display for Error {
             }
             Corruption { at } => {
                 write!(f, "Read corrupted data at file offset {:?}", at)
+            }
+            MergeOperatorFailed(ref e) => {
+                write!(f, "Merge operator failed: {}", e)
             }
         }
     }

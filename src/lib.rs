@@ -494,6 +494,79 @@ impl<F> MergeOperator for F where
 {
 }
 
+/// Like [`MergeOperator`], but your operator can error.
+///
+/// Return `Ok(Some(bytes))` to set a value. Return `Ok(None)` to delete the
+/// value completely. Return `Err(Box::new(err))` to have the call to
+/// [`Tree::merge`] return `Err(Error::MergeOperatorFailed(err))`.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use sled::{Config, IVec, Error};
+///
+/// fn concatenate_merge(
+///   _key: &[u8],               // the key being merged
+///   old_value: Option<&[u8]>,  // the previous value, if one existed
+///   merged_bytes: &[u8]        // the new bytes being merged in
+/// ) -> Result<Option<Vec<u8>>, &'static str> {
+///   if merged_bytes.get(0) == Some(&42) {
+///      return Err("malformed new bytes");
+///   }
+///
+///   let mut ret = old_value
+///     .map(|ov| ov.to_vec())
+///     .unwrap_or_else(|| vec![]);
+///
+///   ret.extend_from_slice(merged_bytes);
+///
+///   Ok(Some(ret))
+/// }
+///
+/// let config = Config::new()
+///   .temporary(true);
+///
+/// let tree = config.open()?;
+/// tree.set_try_merge_operator(concatenate_merge);
+///
+/// let k = b"k1";
+///
+/// tree.try_merge(k, vec![0])?;
+/// tree.try_merge(k, vec![1])?;
+///
+/// // You can use [`Box::downcast`] to get your error type back
+/// match tree.try_merge(k, vec![42]) {
+///     Err(Error::MergeOperatorFailed(err)) => {
+///         assert_eq!(err, "malformed new bytes");
+///     }
+///     Ok(_) => unreachable!("in this example the merge doesn't succeed"),
+///     Err(_) => unreachable!("in this example other errors don't happen"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub trait TryMergeOperator:
+    Send
+    + Sync
+    + Fn(
+        &[u8],
+        Option<&[u8]>,
+        &[u8],
+    ) -> std::result::Result<Option<Vec<u8>>, &'static str>
+{
+}
+impl<F> TryMergeOperator for F where
+    F: Send
+        + Sync
+        + Fn(
+            &[u8],
+            Option<&[u8]>,
+            &[u8],
+        ) -> std::result::Result<Option<Vec<u8>>, &'static str>
+{
+}
+
 mod compile_time_assertions {
     use crate::*;
 

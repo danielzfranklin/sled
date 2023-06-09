@@ -51,7 +51,7 @@ where
                     context: context.clone(),
                     subscribers: Subscribers::default(),
                     root: AtomicU64::new(root_id),
-                    merge_operator: RwLock::new(None),
+                    merge_operator: RwLock::new(tree::MergeOperatorSlot::Unset),
                 })));
             }
             Err(Error::CollectionNotFound) => {}
@@ -102,7 +102,7 @@ where
             subscribers: Subscribers::default(),
             context: context.clone(),
             root: AtomicU64::new(root_id),
-            merge_operator: RwLock::new(None),
+            merge_operator: RwLock::new(tree::MergeOperatorSlot::Unset),
         })));
     }
 }
