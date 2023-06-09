@@ -27,6 +27,7 @@ pub(crate) type CasResult<'a, R> =
 /// An Error type encapsulating various issues that may come up
 /// in the operation of a `Db`.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Error {
     /// The underlying collection no longer exists.
     CollectionNotFound,
@@ -105,10 +106,9 @@ impl From<Error> for io::Error {
         use std::io::ErrorKind;
         match error {
             Io(kind, reason) => io::Error::new(kind, reason),
-            CollectionNotFound => io::Error::new(
-                ErrorKind::NotFound,
-                "collection not found"
-            ),
+            CollectionNotFound => {
+                io::Error::new(ErrorKind::NotFound, "collection not found")
+            }
             Unsupported(why) => io::Error::new(
                 ErrorKind::InvalidInput,
                 format!("operation not supported: {:?}", why),
